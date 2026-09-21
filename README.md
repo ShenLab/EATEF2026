@@ -1,12 +1,14 @@
-# EA/TEF DNV pathway analysis
+# Rare variant burden and pathway enrichment analysis for EA/TEF
 
-Scripts for annotating esophageal atresia / tracheoesophageal fistula (EA/TEF) de novo variants, testing gene-set enrichment, and generating pathway figures. Run every command from the repository root. Paths and analysis parameters are hardcoded near the top of each script; edit those values before running.
+Scripts for case-control burden testing of ultra-rare variants to identify candidate risk genes, and pathway enrichment analysis of de novo variants. Two independent analyses with separate data requirements and workflows.
+
+Run every command from the repository root. Paths and analysis parameters are hardcoded near the top of each script; edit those values before running.
 
 ## Environment
 
 Python >= 3.9
 
-packages: `pandas`, `numpy`, `scipy`, `matplotlib`, `adjustText`, `gseapy`, `networkx`, `openpyxl`
+packages: `pandas`, `numpy`, `scipy`, `matplotlib`, `adjustText`, `gseapy`, `networkx`, `openpyxl`, `statsmodels`
 
 The GO subtree figure also needs Graphviz (`dot` on `PATH`):
 
@@ -14,43 +16,70 @@ The GO subtree figure also needs Graphviz (`dot` on `PATH`):
 conda install -c conda-forge graphviz
 ```
 
-Place input files under `data/`. The MSigDB GO GMT currently points to `/share/vault/Users/xl3126/EATEF/data/c5.all.v2024.1.Hs.symbols.gmt`; change `GMT_FILE` in `scripts/common_pathways.py` and `scripts/common_pathway_universe_spark.py` (or copy the file to `data/c5.all.v2024.1.Hs.symbols.gmt`). Download `data/go-basic.obo` from [Gene Ontology](http://geneontology.org/).
+## Data Files
 
-Expected data files:
+**Included in data folder:**
+- `TS2_Denovo_Variants_allCases_anno.tsv` — De novo variants for pathway enrichment analysis (DNV only)
+- `gene_mutation_rate.new.txt` — Per-gene, per-consequence mutation rates for pathway enrichment
+- `c5.all.v2024.1.Hs.symbols.gmt` — MSigDB Gene Ontology terms (symbols)
+- `09GENCODEV19_blacklist.txt` — Gene blacklist for pathway analysis
 
-- `data/EATEF_SPARK-unaff-sibs.ann.vcf.gz`
-- `data/TableS2.Denovo_Variants_allCases_burden.txt`
-- `data/ensp_to_uniprot.tsv`
-- `data/content/ALL_hum_isoforms_ESM1b_LLR/`
-- `data/hg38_GeneCodeV41_VariantRate_anno.tsv.gz`
-- `data/gene_mutation_rate.new.txt`
-- `data/09GENCODEV19_blacklist.txt`
-- `data/c5.all.v2024.1.Hs.symbols.gmt`
-- `data/go-basic.obo`
-- `data/5_Supplementary_Datasets_MisFit1.5.1.xlsx`
+**Additional required files** (prepare and place in `data/`):
+- `go-basic.obo` — Gene Ontology structure (download from [Gene Ontology](http://geneontology.org/))
 
-Default analysis settings: 161 complex cases, MisFit-S damaging-missense threshold `0.005`, 1,000,000 permutations (`RANDOM_SEED = 42`).
+Default settings: 161 complex cases (pathway), 401 unrelated cases + 47,419 unaffected parental controls from SPARK (burden), MisFit-S threshold 0.005 for damaging missense, 1,000,000 permutations.
 
-## Usage
+---
 
-### 1. Annotate variants and build mutation rates
+## Rare variant case-control burden test (RISK GENES)
 
-Modify input paths in `scripts/eatef/parse_vcf.py` if your VCF or Table S2 files differ.
+**Purpose**: Identify genes with significant enrichment of LoF and/or damaging missense ultra-rare variants in 401 unrelated EA/TEF cases vs 47,419 unaffected unrelated parental controls from SPARK cohort.
 
-Then run those scripts in command line step by step:
+**Input**: Per-gene ultra-rare variant (allele frequency < 1e-5) counts:
+- Count table (TSV) with columns:
+  - Gene name
+  - CaseLofN, CtrlLofN — LoF variant counts
+  - case_MisFit_D_03N, control_MisFit_D_03N — Damaging missense at MisFit_D ≥ 0.3
+  - case_MisFit_D_04N, control_MisFit_D_04N — Damaging missense at MisFit_D ≥ 0.4
+
+**Workflow**:
+
+Prepare per-gene ultra-rare variant counts from case and control cohorts. Remove genes with variants carried by single samples (violating independence assumption) before this step.
 
 ```bash
-python scripts/eatef/parse_vcf.py
-python scripts/eatef/annotate_missense.py
-python scripts/eatef/calculate_esm_mutation_rate.py
-python scripts/eatef/merge_mutation_rates.py
-python scripts/eatef/eatef_burden_thresholds.py
-python scripts/eatef/plot_eatef_thresholds.py
+python risk_gene_analysis.py \
+    --counts <your_counts_table.tsv> \
+    --n-case <N_cases> --n-ctrl <N_controls> \
+    --n-genes <total_protein_coding_genes> \
+    --out risk_gene_burden_results.tsv
 ```
 
-### 2. Model-based LoF+Dmis pathway enrichment
+**Statistical methods**:
+- Per-gene: mid-p binomial test (LoF and damaging missense at each threshold)
+- Combines thresholds: Cauchy combination test
+- Integrates LoF + missense signals: Fisher's method + Cauchy combination
+- Multiple testing correction: Benjamini-Hochberg FDR across 18,225 protein-coding genes
 
-Modify the DNV table, mutation-rate table, GMT, and blacklist in `scripts/common_pathways.py`. The same `results/common_pathway_universe.tsv` must be used by enrichment, permutation, and FWER adjustment.
+**Pre-filtering**: Remove genes with variants carried by single samples (violating independence assumption) before preparing the count table. This ensures each variant is treated as independent observation.
+
+**Output**: `risk_gene_burden_results.tsv`
+- Genes ranked by FDR-adjusted q-value
+- Columns: Gene, case/control counts (LoF, MisFit_D thresholds), relative risk per variant class, p-values (LoF, each MisFit_D threshold, combined missense, integrated gene-level), FDR
+- Candidate risk genes identified at FDR < threshold
+
+---
+
+## Pathway enrichment of de novo variants (DNV only)
+
+**Purpose**: Identify biological pathways enriched for LoF and/or damaging missense de novo variants in 161 complex EA/TEF cases.
+
+**Input**: De novo variants from cases only (no controls in this analysis):
+- `data/TS2_Denovo_Variants_allCases_anno.tsv` — Case DNVs with gene name (HGNC), variant type (Var_type), gene consequence (GeneEff), damaging missense score (MisFit_S)
+- `data/gene_mutation_rate.new.txt` — Background mutation rates per gene per consequence type
+- `data/c5.all.v2024.1.Hs.symbols.gmt` — Gene Ontology pathway definitions
+- `data/09GENCODEV19_blacklist.txt` — Genes to exclude from analysis
+
+**Workflow**:
 
 ```bash
 python scripts/common_pathways.py
@@ -59,29 +88,18 @@ python scripts/lof_dmis/permutation_lof_dmis.py
 python scripts/lof_dmis/adjust_pvalues_lof_dmis.py
 ```
 
-`permutation_lof_dmis.py` runs 1,000,000 permutations and is slow. Change `N_PERMUTATIONS` in the script if you need a shorter test run.
+**Statistical methods**:
+- Per-pathway: observed vs expected LoF and damaging missense counts
+- Expected counts derived from background mutation rates scaled by case number and gene length
+- Poisson test for descriptive p-values
+- Permutation test (1,000,000 iterations) for empirical null distribution
+- FWER-adjusted p-values across all pathways
 
-### 3. SPARK-control background sensitivity analysis
+---
 
-This parallel analysis replaces model-based gene mutation rates with empirical rates from SPARK unaffected siblings (Dataset S3; default `N_Controls = 9789`).
+## Post-analysis: Figures and visualization
 
-```bash
-python scripts/build_spark_control_gene_rates.py
-python scripts/common_pathway_universe_spark.py
-python scripts/lof_spark/pathway_enrichment_lof_spark.py
-python scripts/lof_spark/pathway_permutation_lof_spark.py
-python scripts/lof_spark/pathway_adjust_pvalues_lof_spark.py
-python scripts/lof_dmis_spark/pathway_enrichment_lof_dmis_spark.py
-python scripts/lof_dmis_spark/pathway_permutation_lof_dmis_spark.py
-python scripts/lof_dmis_spark/pathway_adjust_pvalues_lof_dmis_spark.py
-python scripts/compare_og_vs_spark_pathways.py
-```
-
-`compare_og_vs_spark_pathways.py` also looks for LoF-only and Dmis-only adjusted tables (`results/pathway_enrichment_adjusted_lof.tsv`, `results/pathway_enrichment_adjusted_misfit.tsv`, and the SPARK Dmis file). Those companion analyses are not in this repository; comment those entries out of `FILES` if you only ran LoF+Dmis and SPARK LoF / LoF+Dmis.
-
-### 4. Figures and post-analysis
-
-These scripts expect `results/significant_pathway_union_lof_vs_dmis.tsv` (one row per selected pathway, with LoF / Dmis / LoF+Dmis FWER columns). Run `scripts/pathway_similarity_network.py` before `scripts/compare_significant_pathways_lof_dmis.py`.
+After both analyses are complete, generate figures and post-hoc results:
 
 ```bash
 python scripts/pathway_similarity_network.py
@@ -92,44 +110,6 @@ python scripts/build_figure1c_pathway_table.py
 python scripts/metabolic_exclude_transport_autophagy.py
 ```
 
-`post_analysis_go_redundancy.py` and `metabolic_exclude_transport_autophagy.py` recalculate descriptive Poisson p-values. They do not recompute empirical FWER.
+Requires `results/significant_pathway_union_lof_vs_dmis.tsv`. Run `scripts/pathway_similarity_network.py` before `scripts/compare_significant_pathways_lof_dmis.py`.
 
-## Output
-
-### Variant annotation and burden
-
-- `results/EA_TEF_cases_annotated.tsv` and `results/SPARK_controls_annotated.tsv`
-- `results/variants_with_esm.tsv`
-- `results/esm_mutation_rate.tsv`
-- `results/gene_mutation_rate_with_esm.tsv`
-- `results/eatef_burden_results_complex.tsv`
-- `results/eatef_threshold_optimization.png` and `.pdf`
-
-### Model-based LoF+Dmis enrichment
-
-- `results/common_pathway_universe.tsv`
-- `results/pathway_enrichment_lof_dmis.tsv`
-- `results/synonymous_scale_factor_lof_dmis.tsv`
-- `results/permutation_best_pvalues_lof_dmis.tsv`
-- `results/pathway_enrichment_adjusted_lof_dmis.tsv`
-
-### SPARK-control background
-
-- `results/control_background/SPARK_gene_DNV_rates.tsv` and `SPARK_control_variant_qc.tsv`
-- `results/control_background/common_pathway_universe_spark.tsv`
-- `results/control_background/pathway_enrichment_*_spark.tsv`
-- `results/control_background/permutation_best_pvalues_*_spark.tsv`
-- `results/control_background/pathway_enrichment_adjusted_*_spark.tsv`
-- `results/control_background/pathway_model_vs_spark_comparison.tsv`
-- `results/control_background/pathway_model_vs_spark_significance_summary.tsv`
-
-### Figures and post-analysis
-
-- `results/pathway_network_nodes.tsv` and `results/pathway_network_edges.tsv` can be used as input to Cytoscape for visualization and clustering
-- `results/pathway_network_clusters.tsv`, `.pdf`, and `.png`
-- `results/significant_pathway_union_lof_vs_dmis.tsv`, `.pdf`, and `.png`
-- `results/post_analysis_go_redundancy_results.tsv`
-- `results/significant_pathway_go_subtree.pdf`, `.png`, and `.svg`
-- `results/Figure1C_pathway_statistics_and_DNV_genes.tsv`
-- `results/metabolic_enrichment_excluding_transport_autophagy.tsv`
-- `results/metabolic_overlap_excluded_genes.tsv`
+---
